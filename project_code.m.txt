@@ -1,0 +1,110 @@
+% %% Step 1: Set up initial parameters and physical constants
+clc; clear; close all;
+
+% Base physical parameters
+inlet_temp = 293.0;        % Entry stagnation temperature [K]
+heat_ratio = 1.4;          % Heat capacity ratio
+gas_const = 287.0;         % Air gas constant [J/(kg·K)]
+exit_mach = 0.55;          % Desired Mach number at exit
+viscosity = 1.83e-5;       % Air viscosity [Pa·s]
+proto_size = 0.2;          % Original design size [m]
+reynolds_goal = 3e6;       % Required Reynolds number
+pressure_limit = 250.0;    % Upper pressure limit [kPa]
+ambient_press = 101.325;   % Standard atmosphere [kPa]
+
+% Calculate the isentropic factor for exit conditions
+isentropic_factor = 1 + (heat_ratio - 1) / 2 * exit_mach^2;
+
+%% Step 2: Import compressor performance data
+sheet_name = 'Compressor_operation_map.xlsx';
+raw_data = readmatrix(sheet_name);
+
+flow_base = raw_data(:,1);     % Baseline flow rate [kg/s]
+temp_factor = raw_data(:,2);   % Temperature increase factor
+press_factor = raw_data(:,3);  % Pressure increase factor
+
+comp_data = struct();
+comp_data.flow_base = flow_base;
+comp_data.temp_factor = temp_factor;
+comp_data.press_factor = press_factor;
+
+%% Step 3: Calculate initial pressure estimates and parameters
+comp_data.inlet_press_est = pressure_limit ./ comp_data.press_factor;  % in kPa
+
+comp_data.exit_temp_stag = comp_data.temp_factor * inlet_temp;
+comp_data.exit_temp_static = comp_data.exit_temp_stag / isentropic_factor;
+comp_data.exit_press_stag = 0.985 * comp_data.press_factor .* comp_data.inlet_press_est * 1000;
+comp_data.exit_press_static = comp_data.exit_press_stag ./ (isentropic_factor ^ (heat_ratio/(heat_ratio - 1)));
+comp_data.exit_density_est = comp_data.exit_press_static ./ (gas_const * comp_data.exit_temp_static);
+comp_data.sound_speed_est = sqrt(heat_ratio * gas_const * comp_data.exit_temp_static);
+comp_data.flow_velocity_est = exit_mach * comp_data.sound_speed_est;
+comp_data.mass_flow = comp_data.flow_base .* (comp_data.inlet_press_est / ambient_press);
+comp_data.scale_factor = sqrt(comp_data.mass_flow ./ (comp_data.exit_density_est .* comp_data.flow_velocity_est * pi * proto_size^2));
+comp_data.viable_scale = comp_data.scale_factor;
+
+%% Step 4: Refine pressure calculations using Reynolds number matching
+comp_data.density_factor = (0.985 * comp_data.press_factor * 1000 * isentropic_factor) ./ ((isentropic_factor ^ (heat_ratio/(heat_ratio - 1))) * gas_const * comp_data.temp_factor * inlet_temp);
+exit_vel_fixed = exit_mach * sqrt(heat_ratio * gas_const * (comp_data.temp_factor * inlet_temp / isentropic_factor));
+comp_data.inlet_press_calc = (reynolds_goal * viscosity) ./ (comp_data.density_factor .* exit_vel_fixed .* (comp_data.scale_factor * proto_size));
+comp_data.inlet_press_calc = min(comp_data.inlet_press_calc, 250.0);
+
+%% Step 5: Identify optimal operating point
+[max_scale_val, best_index] = max(comp_data.viable_scale);
+optimal_inlet_press = comp_data.inlet_press_calc(best_index);
+optimal_press_ratio = comp_data.press_factor(best_index);
+optimal_flow_base = comp_data.flow_base(best_index);
+optimal_temp_ratio = comp_data.temp_factor(best_index);
+
+fprintf('Optimal Operating Conditions:\n');
+fprintf('Maximum Scale Factor (model/prototype): %.2f\n', max_scale_val);
+fprintf('Inlet Stagnation Pressure (kPa): %.2f\n', optimal_inlet_press);
+fprintf('Compressor Operating Parameters:\n');
+fprintf('  Base Flow Rate (kg/s): %.2f\n', optimal_flow_base);
+fprintf('  Temperature Ratio: %.2f\n', optimal_temp_ratio);
+fprintf('  Pressure Ratio: %.2f\n', optimal_press_ratio);
+
+%% Step 6: Generate compressor map visualization
+figure('Position', [100, 100, 800, 600]);
+plot(comp_data.flow_base, comp_data.press_factor, 'bo-', 'LineWidth', 2, 'DisplayName', 'Compressor Performance');
+hold on;
+plot(optimal_flow_base, optimal_press_ratio, 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'DisplayName', 'Optimal Point');
+xlabel('Base Flow Rate (kg/s)', 'FontSize', 12);
+ylabel('Pressure Ratio', 'FontSize', 12);
+title('Compressor Performance Map: Pressure Ratio vs. Base Flow Rate', 'FontSize', 14);
+legend('Location', 'best');
+grid on;
+set(gca, 'FontSize', 12);
+xlim([min(comp_data.flow_base)-0.01, max(comp_data.flow_base)+0.01]);
+ylim([min(comp_data.press_factor)-0.001, max(comp_data.press_factor)+0.001]);
+saveas(gcf, 'compressor_performance.png');
+
+%% Step 7: Additional analysis and performance metrics
+comp_data.press_diff = comp_data.press_factor .* comp_data.inlet_press_calc - comp_data.inlet_press_calc;
+comp_data.comp_power = comp_data.mass_flow .* comp_data.temp_factor .* inlet_temp .* (comp_data.press_factor.^((heat_ratio-1)/heat_ratio) - 1) * (heat_ratio*gas_const/(heat_ratio-1));
+
+figure('Position', [100, 100, 800, 600]);
+plot(comp_data.inlet_press_calc, comp_data.viable_scale, 'b-', 'LineWidth', 2);
+hold on;
+plot(optimal_inlet_press, max_scale_val, 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+xlabel('Inlet Stagnation Pressure (kPa)', 'FontSize', 12);
+ylabel('Scale Factor (model/prototype)', 'FontSize', 12);
+title('Scale Factor vs. Inlet Stagnation Pressure', 'FontSize', 14);
+grid on;
+set(gca, 'FontSize', 12);
+saveas(gcf, 'scale_vs_pressure_chart.png');
+
+valid_indices = comp_data.inlet_press_calc <= pressure_limit & comp_data.press_factor >= 1.068;
+fprintf('\nRange of Feasible Operating Conditions:\n');
+fprintf('Inlet Pressure Range: %.2f - %.2f kPa\n', min(comp_data.inlet_press_calc(valid_indices)), max(comp_data.inlet_press_calc(valid_indices)));
+fprintf('Scale Factor Range: %.2f - %.2f\n', min(comp_data.viable_scale(valid_indices)), max(comp_data.viable_scale(valid_indices)));
+
+fprintf('\nPerformance Metrics at Optimal Point:\n');
+fprintf('Pressure Ratio: %.2f\n', optimal_press_ratio);
+fprintf('Temperature Ratio: %.2f\n', optimal_temp_ratio);
+fprintf('Mass Flow Rate: %.2f kg/s\n', comp_data.mass_flow(best_index));
+fprintf('Compressor Power: %.2f kW\n', comp_data.comp_power(best_index)/1000);
+
+results_table = table(comp_data.flow_base, comp_data.press_factor, comp_data.temp_factor, comp_data.inlet_press_calc, comp_data.viable_scale, comp_data.comp_power/1000, ...
+    'VariableNames', {'BaseFlow', 'PressureRatio', 'TempRatio', 'InletPressure', 'ScaleFactor', 'PowerRequired_kW'});
+writetable(results_table, 'compressor_analysis_output.csv');
+fprintf('\nResults exported to compressor_analysis_output.csv\n');
